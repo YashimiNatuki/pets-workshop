@@ -1,0 +1,97 @@
+# Base44 development environment for the Tailspin Shelter workshop app.
+#
+#   web  -> Astro dev server (SSR) on host port 3000
+#   api  -> Flask + SQLite on host port 5100
+#
+# Both services run from the bind-mounted cloned source with live reload, so
+# edits are picked up without rebuilding images.
+
+services:
+  api:
+    image: python:3.12-slim
+    working_dir: /app/app/server
+    command:
+      - sh
+      - -ec
+      - |
+        pip install --disable-pip-version-check -r requirements.txt
+        python utils/seed_database.py
+        exec flask --app app run --host 0.0.0.0 --port 5100 --debug
+    environment:
+      - FLASK_DEBUG=1
+      - PYTHONUNBUFFERED=1
+      - PIP_CACHE_DIR=/root/.cache/pip
+      # Werkzeug's reloader polls the bind-mounted source for changes.
+      - WERKZEUG_RUN_MAIN=${WERKZEUG_RUN_MAIN:-}
+    ports:
+      - "5100:5100"
+    volumes:
+      - .:/app
+      - api_pip_cache:/root/.cache/pip
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5100/api/dogs', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+    restart: on-failure
+    labels:
+      base44.project: "Tailspin Shelter API"
+      base44.kind: "api"
+      base44.port: "5100"
+
+  web:
+    image: node:22
+    working_dir: /app/app/client
+    command:
+      - sh
+      - -ec
+      - |
+        # package-lock.json in this repo is out of sync with package.json, so
+        # npm ci refuses to run; --no-save installs from package.json without
+        # rewriting the committed lockfile.
+        npm install --no-save --no-audit --no-fund
+        exec npm run dev -- --host 0.0.0.0 --port 4321
+    environment:
+      - NODE_ENV=development
+      - HOST=0.0.0.0
+      # Astro renders on the server and calls the API over the compose network.
+      - API_SERVER_URL=http://api:5100
+      # Vite appends this to server.allowedHosts so the preview proxy's host is
+      # accepted (the sandbox id rotates, so it must come from the environment).
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+      - BASE44_PREVIEW_MODE
+      # Polling keeps file watching reliable across bind mounts.
+      - CHOKIDAR_USEPOLLING=1
+      - WATCHPACK_POLLING=true
+    ports:
+      - "3000:4321"
+    volumes:
+      - .:/app
+      - client_node_modules:/app/app/client/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4321/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    restart: on-failure
+    labels:
+      base44.project: "Tailspin Shelter"
+      base44.kind: "web"
+      base44.port: "3000"
+
+volumes:
+  client_node_modules:
+  api_pip_cache:
